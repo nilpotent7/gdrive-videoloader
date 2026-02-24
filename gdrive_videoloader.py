@@ -204,7 +204,7 @@ def main(video_id_or_url: str, output_file: str = None, chunk_size: int = 1024, 
     video, title = get_video_url(page_content, verbose)
 
     filename = output_file if output_file else title
-    
+
     # Remove invalid characters (Windows + Linux)
     valid_filename = re.sub(r'[<>:"/\\|?*\x00-\x1F]', '', filename)
     # Remove trailing spaces or dots (Windows restriction)
