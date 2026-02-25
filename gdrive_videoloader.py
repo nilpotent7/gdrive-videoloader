@@ -78,7 +78,8 @@ def download_part(url: str, cookies: dict, thread_lock, start: int, end: int, pa
         for chunk in response.iter_content(chunk_size=chunk_size):
             f.write(chunk)
             pbar.update(len(chunk))
-            gpbar.update(len(chunk))
+            with thread_lock:
+                gpbar.update(len(chunk))
             downloaded += len(chunk)
 
             # Check Part fully downloaded
