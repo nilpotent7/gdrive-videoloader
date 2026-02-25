@@ -7,6 +7,9 @@ import os
 import re
 import threading
 import math
+import shutil
+
+thread_errors = []
 
 def extract_drive_id(input_str: str) -> str:
     """Extracts the Google Drive file ID from a URL or returns the input if it's already an ID."""
@@ -42,7 +45,7 @@ def get_file_size(url: str, cookies: dict) -> int:
     size = int(response.headers.get('content-length', 0))
     return size
 
-def download_part(url: str, cookies: dict, start: int, end: int, part_num: int, part_filename: str, chunk_size: int, pbar: tqdm, gpbar: tqdm, verbose: bool) -> None:
+def download_part(url: str, cookies: dict, thread_lock, start: int, end: int, part_num: int, part_filename: str, chunk_size: int, pbar: tqdm, gpbar: tqdm, verbose: bool) -> None:
     """Downloads a specific byte range of the file and writes it to a part file."""
     headers = {'Range': f'bytes={start}-{end}'}
 
@@ -52,20 +55,23 @@ def download_part(url: str, cookies: dict, start: int, end: int, part_num: int, 
         downloaded = os.path.getsize(part_filename)
         if downloaded > 0:
             headers['Range'] = f'bytes={start + downloaded}-{end}'
+
+            # Update Progress
+            pbar.update(downloaded)
+            with thread_lock:
+                gpbar.update(downloaded)
+            
             if verbose:
                 print(f"[INFO] Resuming part {part_filename} from byte {start + downloaded}")
 
+    # Check Part already fully downloaded
     if downloaded >= (end - start + 1):
-        # Part already fully downloaded
-        pbar.update(downloaded)
-        gpbar.update(downloaded)
         return
         
     s = requests.Session()
     response = s.get(url, stream=True, cookies=cookies, headers=headers)
     if response.status_code not in (200, 206):
-        print(f"[ERROR] Failed to download part {part_filename}, status: {response.status_code}")
-        return
+        raise (f"[ERROR] Failed to download part {part_filename}, status: {response.status_code}")
     
     file_mode = 'ab' if os.path.exists(part_filename) and os.path.getsize(part_filename) > 0 else 'wb'
     with open(part_filename, file_mode) as f:
@@ -77,19 +83,29 @@ def download_part(url: str, cookies: dict, start: int, end: int, part_num: int, 
 
             # Check Part fully downloaded
             if downloaded >= (end - start + 1):
-                pbar.update(downloaded)
                 break
-    
+
+def download_part_wrapper(*args):
+    try:
+        download_part(*args)
+    except Exception as e:
+        thread_errors.append(e)
 
 def merge_parts(part_files: list[str], output_filename: str, verbose: bool) -> None:
     """Merges all part files into the final output file."""
     if verbose:
         print(f"[INFO] Merging {len(part_files)} parts into {output_filename}")
+
+    missing = [pf for pf in part_files if not os.path.exists(pf)]
+    if missing:
+        print(f"[ERROR] Missing parts: {missing}")
+        return
+
     with open(output_filename, 'wb') as outfile:
         for part_file in part_files:
             print("Merging " + part_file)
             with open(part_file, 'rb') as pf:
-                outfile.write(pf.read())
+                shutil.copyfileobj(pf, outfile)
     
     for part_file in part_files: # Cleanup
         os.remove(part_file)
@@ -106,8 +122,6 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
         return
     if total_size == 0:
         print("[WARN] Could not determine file size. Falling back to single-threaded download.")
-        download_single_threaded(url, cookies, filename, chunk_size, verbose)
-        return
         download_single_threaded(url, cookies, filename, chunk_size, verbose)
         return
 
@@ -130,13 +144,13 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
         tqdm(
             unit='B', unit_scale=True,
             desc="Downloading Part " + str(i+1),
-            start = i * part_size
-            end = min(start + part_size - 1, total_size - 1)
-            total = end - start + 1
+            total=min((i * part_size) + part_size - 1, total_size - 1) - (i * part_size) + 1,
             position=i+1
         )
         for i in range(num_threads)
     ]
+
+    thread_lock = threading.Lock()
 
     for i in range(num_threads):
         start = i * part_size
@@ -145,8 +159,8 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
         part_files.append(part_filename)
 
         t = threading.Thread(
-            target=download_part,
-            args=(url, cookies, start, end, i, part_filename, chunk_size, pbars[i], gpBar, verbose),
+            target=download_part_wrapper,
+            args=(url, cookies, thread_lock, start, end, i, part_filename, chunk_size, pbars[i], gpBar, verbose),
             daemon=True
         )
         threads.append(t)
@@ -155,8 +169,13 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
     for t in threads:
         t.join()
 
+    gpBar.close()
     for pbar in pbars:
         pbar.close()
+    
+    if(len(thread_errors) > 0):
+        print(f"[ERROR] One of the parts failed. Check the console for details. Exiting...")
+        return
 
     # Verify all parts downloaded correctly
     downloaded_total = sum(os.path.getsize(pf) for pf in part_files if os.path.exists(pf))
@@ -232,7 +251,7 @@ if __name__ == "__main__":
     parser.add_argument("-c", "--chunk_size", type=int, default=1024, help="Optional chunk size (in bytes) for downloading the video. Default is 1024 bytes.")
     parser.add_argument("-t", "--threads", type=int, default=4, choices=range(1, 17), help="Number of parallel download threads (1-16). Default is 4.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose mode.")
-    parser.add_argument("--version", action="version", version="%(prog)s 2.0")
+    parser.add_argument("--version", action="version", version="%(prog)s 1.1.0")
 
     args = parser.parse_args()
     main(args.video_id, args.output, args.chunk_size, args.threads, args.verbose)
