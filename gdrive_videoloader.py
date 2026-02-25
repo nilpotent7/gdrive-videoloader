@@ -58,6 +58,7 @@ def download_part(url: str, cookies: dict, start: int, end: int, part_num: int, 
     if downloaded >= (end - start + 1):
         # Part already fully downloaded
         pbar.update(downloaded)
+        gpbar.update(downloaded)
         return
         
     s = requests.Session()
@@ -66,7 +67,8 @@ def download_part(url: str, cookies: dict, start: int, end: int, part_num: int, 
         print(f"[ERROR] Failed to download part {part_filename}, status: {response.status_code}")
         return
     
-    with open(part_filename, 'wb') as f:
+    file_mode = 'ab' if os.path.exists(part_filename) and os.path.getsize(part_filename) > 0 else 'wb'
+    with open(part_filename, file_mode) as f:
         for chunk in response.iter_content(chunk_size=chunk_size):
             f.write(chunk)
             pbar.update(len(chunk))
@@ -99,8 +101,13 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
     """Downloads the file using multiple threads, each handling a byte-range segment."""
 
     total_size = get_file_size(url, cookies)
-    if total_size == 0 or num_threads == 1:
+    if num_threads == 1:
+        download_single_threaded(url, cookies, filename, chunk_size, verbose)
+        return
+    if total_size == 0:
         print("[WARN] Could not determine file size. Falling back to single-threaded download.")
+        download_single_threaded(url, cookies, filename, chunk_size, verbose)
+        return
         download_single_threaded(url, cookies, filename, chunk_size, verbose)
         return
 
@@ -123,7 +130,9 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
         tqdm(
             unit='B', unit_scale=True,
             desc="Downloading Part " + str(i+1),
-            total=min((i*part_size) + part_size - 1, total_size - 1)-(i*part_size),
+            start = i * part_size
+            end = min(start + part_size - 1, total_size - 1)
+            total = end - start + 1
             position=i+1
         )
         for i in range(num_threads)
@@ -146,7 +155,8 @@ def download_file(url: str, cookies: dict, filename: str, chunk_size: int, num_t
     for t in threads:
         t.join()
 
-    [pbar.close() for pbar in pbars]
+    for pbar in pbars:
+        pbar.close()
 
     # Verify all parts downloaded correctly
     downloaded_total = sum(os.path.getsize(pf) for pf in part_files if os.path.exists(pf))
@@ -211,7 +221,7 @@ def main(video_id_or_url: str, output_file: str = None, chunk_size: int = 1024, 
     valid_filename = re.sub(r'[. ]+$', '', valid_filename)
     
     if video:
-        download_file(video, cookies, filename, chunk_size, num_threads, verbose)
+        download_file(video, cookies, valid_filename, chunk_size, num_threads, verbose)
     else:
         print("Unable to retrieve the video URL. Ensure the video ID is correct and accessible.")
 
@@ -220,7 +230,7 @@ if __name__ == "__main__":
     parser.add_argument("video_id", type=str, help="The video ID from Google Drive or a full Google Drive URL (e.g., 'abc-Qt12kjmS21kjDm2kjd' or 'https://drive.google.com/file/d/ID/view').")
     parser.add_argument("-o", "--output", type=str, help="Optional output file name for the downloaded video (default: video name in gdrive).")
     parser.add_argument("-c", "--chunk_size", type=int, default=1024, help="Optional chunk size (in bytes) for downloading the video. Default is 1024 bytes.")
-    parser.add_argument("-t", "--threads", type=int, default=4, help="Number of parallel download threads. Default is 4.")
+    parser.add_argument("-t", "--threads", type=int, default=4, choices=range(1, 17), help="Number of parallel download threads (1-16). Default is 4.")
     parser.add_argument("-v", "--verbose", action="store_true", help="Enable verbose mode.")
     parser.add_argument("--version", action="version", version="%(prog)s 2.0")
 
